@@ -26,10 +26,10 @@ rather than starting from zero every session.
 | | |
 |---|---|
 | **Command** | Agent console with a live tool trace. You see every tool call, its arguments, its result and its cost as it happens. |
-| **Ontology** | A force-directed entity graph. People, systems, projects and concepts, with typed links, link analysis and entity resolution. |
+| **Ontology** | A force-directed entity graph. People, systems, projects and concepts, with typed links, link analysis, and a curation queue for merging duplicates. |
 | **Knowledge** | Persistent memory with hybrid recall, plus a searchable corpus of your PDFs, notes, spreadsheets and code. |
 | **Studio** | Image and video generation across seven backends, including two that run entirely on your own GPU. |
-| **Flows** | Visual DAG workflows that chain models, agents, tools, memory and media into repeatable pipelines. |
+| **Flows** | Visual DAG workflows you edit on the canvas — chain models, agents, tools, memory and media, and loop until a critic approves. |
 | **Systems** | Model registry with live health and cost tracking, an encrypted credential vault, MCP hub management, and the tool catalogue. |
 
 ---
@@ -166,12 +166,16 @@ Nothing leaves your machine except calls to the providers whose keys you supplie
 ```
 
 ```bash
-cd apps/server && ../../.venv/bin/python -m pytest tests/ -q   # 33 tests, no keys needed
+cd apps/server && ../../.venv/bin/python -m pytest tests/ -q   # 336 tests, no keys needed
 cd apps/web && npm run typecheck
 ```
 
-The suite drives the agent loop with a scripted provider, so tool dispatch, parallel calls,
-failure handling, cancellation and step ceilings are all covered without a network call.
+The suite drives the agent loop with a scripted provider and the HTTP surface through an
+in-process transport, so tool dispatch, parallel calls, failure handling, cancellation, step
+ceilings, every API contract, the file deny-list, token auth and the credential vault are all
+covered without a network call or a key. CI runs it on Python 3.10 and 3.12 and holds three
+ratchets: statement coverage, a gzipped bundle ceiling, and a clean-room keyless boot that writes
+a memory and recalls it.
 
 ```
 apps/
@@ -187,8 +191,10 @@ apps/
     mcp/        dependency-free MCP client (stdio + HTTP)
     hubs/       connectors and web search
     media/      image and video generation, asset library
-    workflows/  DAG engine with level-wise parallelism
+    workflows/  DAG engine with level-wise parallelism and bounded loop nodes
     api/        REST routers + WebSocket
+    scheduler   due tasks and watched folders, on a background tick
+    backup.py   snapshot, verify, restore, optional passphrase encryption
   web/          React + TypeScript + Tailwind
   desktop/      Electron shell
 ```
@@ -207,13 +213,19 @@ Stated plainly, because the alternative is you discovering them yourself:
 - **Non-Anthropic model pricing is seeded where it is well-published and left at zero otherwise.**
   A zero means "not seeded", not "free" — set the real figure in the Models panel and it sticks.
   Anthropic figures come from the current API reference; Ollama and local models genuinely are free.
-- **The workflow canvas is a viewer.** Graphs are edited as JSON, validated server-side. A
-  half-working node editor would be worse than a clear diagram beside the source of truth.
 - **Video generation is fire-and-forget.** Renders take minutes; the asset appears in the Studio
   when it lands.
 - **Media provider adapters are written to documented REST endpoints but have not been run against
-  live paid APIs** in this build. The local backends (ComfyUI, Automatic1111) and the whole
-  keyless path are verified.
+  live paid APIs** in this build. Their request building and response parsing are covered by
+  fixture tests; the endpoints themselves are unconfirmed. The local backends (ComfyUI,
+  Automatic1111) and the whole keyless path are verified.
+- **No live model round-trip has ever happened here.** The gateway is proven against a scripted
+  provider and recorded-shape fixtures, and the per-model request quirks are pinned by tests, but
+  this build has never held a provider credential. `scripts/record_fixture.py` turns a real call
+  into a replayable fixture once you have one.
+- **The database is not encrypted at rest.** The credential vault is; the SQLite file beside it is
+  not, because that needs SQLCipher — a build of SQLite rather than a Python package. Backups can
+  be encrypted with a passphrase, and full-disk encryption covers the live workspace.
 
 ---
 
