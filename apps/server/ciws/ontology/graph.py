@@ -21,7 +21,7 @@ import numpy as np
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, or_, select, text as sql_text
 
-from ..core.errors import NotFound
+from ..core.errors import NotFound, ValidationFailed
 from ..core.events import Topic, bus
 from ..core.logging import get_logger
 from ..core.util import now, truncate
@@ -876,8 +876,56 @@ async def find_duplicates(
                     "reason": "high semantic similarity",
                 }
 
-    rows = sorted(pairs.values(), key=lambda p: -p["similarity"])
+    # Drop anything a human has already looked at and rejected. Without this a
+    # curation queue never empties: the same false positive is re-proposed every
+    # time the panel opens, and the queue stops being a to-do list.
+    dismissed = {
+        tuple(sorted((entity.id, str(other))))
+        for entity in entities
+        for other in (entity.properties or {}).get(NOT_DUPLICATE_OF, [])
+    }
+    rows = [
+        pair
+        for key, pair in pairs.items()
+        if tuple(sorted((pair["a"]["id"], pair["b"]["id"]))) not in dismissed
+    ]
+    rows.sort(key=lambda p: -p["similarity"])
     return rows[:limit]
+
+
+#: Property key holding ids this entity has been judged *not* a duplicate of.
+NOT_DUPLICATE_OF = "not_duplicate_of"
+
+
+async def dismiss_duplicate(a_id: str, b_id: str) -> dict[str, Any]:
+    """Record that two entities are genuinely different things.
+
+    Written to both sides so the judgement survives whichever one is loaded
+    first, and so it is visible on the entity itself rather than hidden in a
+    side table nobody thinks to look in.
+    """
+    if a_id == b_id:
+        raise ValidationFailed("An entity cannot be a duplicate of itself")
+
+    async with session_scope() as s:
+        rows = (
+            await s.execute(select(Entity).where(Entity.id.in_([a_id, b_id])))
+        ).scalars().all()
+        found = {row.id: row for row in rows}
+        for wanted in (a_id, b_id):
+            if wanted not in found:
+                raise NotFound(f"No entity {wanted}")
+
+        for this_id, other_id in ((a_id, b_id), (b_id, a_id)):
+            entity = found[this_id]
+            properties = dict(entity.properties or {})
+            existing = [str(v) for v in properties.get(NOT_DUPLICATE_OF, [])]
+            if other_id not in existing:
+                properties[NOT_DUPLICATE_OF] = [*existing, other_id]
+                entity.properties = properties
+
+    bus.publish(Topic.GRAPH_MERGE, action="dismissed", a=a_id, b=b_id)
+    return {"ok": True, "a": a_id, "b": b_id}
 
 
 async def merge_entities(keep_id: str, merge_ids: list[str]) -> Entity:

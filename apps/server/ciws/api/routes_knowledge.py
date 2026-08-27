@@ -226,6 +226,15 @@ async def merge_entities(
     return graph.node_dict(entity)
 
 
+@router.post("/graph/duplicates/dismiss")
+async def dismiss_duplicate(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Mark a proposed pair as genuinely two different things."""
+    a_id, b_id = str(body.get("a_id") or ""), str(body.get("b_id") or "")
+    if not a_id or not b_id:
+        raise ValidationFailed("Both a_id and b_id are required")
+    return await graph.dismiss_duplicate(a_id, b_id)
+
+
 @router.post("/graph/extract")
 async def extract_graph(
     text: str = Body(..., embed=True), project_id: str | None = Body(None, embed=True)

@@ -12,9 +12,7 @@
  */
 
 import {
-  AlertTriangle,
-  Check,
-  Code2,
+  Pencil,
   Play,
   RefreshCw,
   Workflow as WorkflowIcon,
@@ -35,6 +33,7 @@ import {
   useToast,
   usd,
 } from '../components/ui'
+import { FlowEditor } from '../components/FlowEditor'
 import { api, events, type WorkflowRow } from '../lib/api'
 
 interface NodeType {
@@ -185,8 +184,8 @@ export function Flows({ projectId }: { projectId: string | null }) {
         actions={
           <>
             {workflow && (
-              <button className="btn btn-ghost !p-1" onClick={() => setEditing(true)} title="Edit graph JSON">
-                <Code2 size={12} />
+              <button className="btn btn-ghost !p-1" onClick={() => setEditing(true)} title="Edit graph">
+                <Pencil size={12} />
               </button>
             )}
             <button
@@ -284,6 +283,7 @@ export function Flows({ projectId }: { projectId: string | null }) {
           open={editing}
           onClose={() => setEditing(false)}
           workflow={workflow}
+          nodeTypes={workflows.data?.node_types ?? []}
           onSaved={() => {
             detail.reload()
             workflows.reload()
@@ -436,75 +436,29 @@ function GraphEditor({
   open,
   onClose,
   workflow,
+  nodeTypes,
   onSaved,
 }: {
   open: boolean
   onClose: () => void
   workflow: WorkflowRow
+  nodeTypes: NodeType[]
   onSaved: () => void
 }) {
   const toast = useToast()
-  const [text, setText] = useState('')
-  const [problems, setProblems] = useState<string[]>([])
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    if (open) {
-      setText(JSON.stringify(workflow.graph, null, 2))
-      setProblems([])
-      setError('')
-    }
-  }, [open, workflow.graph])
-
-  const validate = useCallback(async () => {
-    try {
-      const graph = JSON.parse(text)
-      const result = await api.post<{ ok: boolean; problems: string[] }>('/workflows/validate', graph)
-      setProblems(result.problems)
-      setError('')
-      if (result.ok) toast('Graph is valid', 'success')
-    } catch (err) {
-      setError((err as Error).message)
-    }
-  }, [text, toast])
-
   return (
-    <Modal open={open} onClose={onClose} title={`Graph — ${workflow.name}`} width="max-w-3xl">
+    <Modal open={open} onClose={onClose} title={`Graph \u2014 ${workflow.name}`} width="max-w-6xl">
       <div className="space-y-3">
-        <div className="text-2xs text-faint leading-relaxed">
-          Nodes need <span className="text-dim">id</span>, <span className="text-dim">type</span> and{' '}
-          <span className="text-dim">config</span>. Edges need{' '}
-          <span className="text-dim">source</span> and <span className="text-dim">target</span>, plus
-          optional <span className="text-dim">sourcePort</span> / <span className="text-dim">targetPort</span>{' '}
-          when a node has more than one.
-        </div>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={20}
-          spellCheck={false}
-          className="field font-mono text-xs leading-relaxed resize-y"
-        />
         <ErrorLine error={error} />
-        {problems.length > 0 && (
-          <div className="space-y-1">
-            {problems.map((problem, index) => (
-              <div key={index} className="flex items-start gap-2 text-2xs text-amber">
-                <AlertTriangle size={11} className="shrink-0 mt-0.5" />
-                {problem}
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="flex justify-end gap-2">
-          <button className="btn" onClick={validate}>
-            <Check size={11} /> validate
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={async () => {
+        {open && (
+          <FlowEditor
+            initial={(workflow.graph as any) ?? { nodes: [], edges: [] }}
+            nodeTypes={nodeTypes as any}
+            onCancel={onClose}
+            onSave={async (graph) => {
               try {
-                const graph = JSON.parse(text)
                 await api.patch(`/workflows/${workflow.id}`, { graph })
                 toast('Saved', 'success')
                 onSaved()
@@ -513,10 +467,8 @@ function GraphEditor({
                 setError((err as Error).message)
               }
             }}
-          >
-            Save
-          </button>
-        </div>
+          />
+        )}
       </div>
     </Modal>
   )

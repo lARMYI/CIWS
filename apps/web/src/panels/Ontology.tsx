@@ -13,6 +13,7 @@
 
 import {
   Crosshair,
+  ArrowLeftRight,
   GitMerge,
   Layers,
   Maximize2,
@@ -66,6 +67,13 @@ const CENTER_PULL = 0.0022
 const DAMPING = 0.86
 const COOL_RATE = 0.994
 const MIN_ALPHA = 0.004
+
+type DuplicatePair = {
+  a: GraphNode
+  b: GraphNode
+  similarity: number
+  reason: string
+}
 
 export function Ontology({ projectId }: { projectId: string | null }) {
   const toast = useToast()
@@ -770,43 +778,136 @@ function EntityDetail({
 
 function Duplicates({ onMerged }: { onMerged: () => void }) {
   const toast = useToast()
+  const [threshold, setThreshold] = useState(0.9)
+  const [swapped, setSwapped] = useState<Record<string, boolean>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+
   const duplicates = useAsync(
-    () => api.get<{ candidates: any[] }>('/graph/duplicates', { threshold: 0.9 }),
-    [],
+    () => api.get<{ candidates: DuplicatePair[] }>('/graph/duplicates', { threshold }),
+    [threshold],
   )
   const candidates = duplicates.data?.candidates ?? []
-  if (!candidates.length) return null
+
+  const keyOf = (pair: DuplicatePair) => `${pair.a.id}:${pair.b.id}`
 
   return (
     <div>
       <div className="label mb-1 flex items-center gap-1.5">
-        <GitMerge size={10} /> Possible duplicates
+        <GitMerge size={10} /> Curate duplicates
+        {candidates.length > 0 && <span className="text-faint">({candidates.length})</span>}
       </div>
+
+      <label className="mb-2 flex items-center gap-2 text-2xs text-faint">
+        similarity
+        <input
+          type="range"
+          min={0.7}
+          max={0.99}
+          step={0.01}
+          value={threshold}
+          onChange={(e) => setThreshold(Number(e.target.value))}
+          className="flex-1 accent-cyan"
+        />
+        <span className="font-mono text-dim tabular-nums">{threshold.toFixed(2)}</span>
+      </label>
+
+      {duplicates.loading && <Spinner />}
+
+      {!duplicates.loading && candidates.length === 0 && (
+        <div className="text-2xs text-faint">
+          Nothing above this similarity. Lower the threshold to look harder.
+        </div>
+      )}
+
       <div className="space-y-1.5">
-        {candidates.slice(0, 5).map((pair, index) => (
-          <div key={index} className="surface p-2">
-            <div className="text-2xs text-dim truncate">{pair.a.name}</div>
-            <div className="text-2xs text-faint truncate">{pair.b.name}</div>
-            <div className="flex items-center justify-between mt-1.5">
-              <span className="text-2xs text-faint">{pair.reason}</span>
-              <button
-                className="btn !py-0.5 !px-1.5 !text-2xs"
-                onClick={async () => {
-                  try {
-                    await api.post('/graph/merge', { keep_id: pair.a.id, merge_ids: [pair.b.id] })
-                    toast('Merged', 'success')
-                    duplicates.reload()
-                    onMerged()
-                  } catch (err) {
-                    toast((err as Error).message, 'error')
-                  }
-                }}
-              >
-                merge
-              </button>
+        {candidates.slice(0, 12).map((pair) => {
+          const key = keyOf(pair)
+          const flipped = swapped[key] ?? false
+          // The survivor keeps its own name and description; everything on the
+          // other side folds into it as an alias. Which one survives is a
+          // judgement the person curating has to be able to make.
+          const keep = flipped ? pair.b : pair.a
+          const drop = flipped ? pair.a : pair.b
+          return (
+            <div key={key} className="surface p-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-2xs text-dim">
+                    <span className="text-green">keep</span> {keep.name}
+                    {keep.mention_count > 0 && (
+                      <span className="text-faint"> · {keep.mention_count} mentions</span>
+                    )}
+                  </div>
+                  <div className="truncate text-2xs text-faint">
+                    <span className="text-rose">fold</span> {drop.name}
+                    {drop.mention_count > 0 && (
+                      <span> · {drop.mention_count} mentions</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  className="btn !py-0.5 !px-1.5 !text-2xs"
+                  title="Swap which one survives"
+                  onClick={() => setSwapped((s) => ({ ...s, [key]: !flipped }))}
+                >
+                  <ArrowLeftRight size={9} />
+                </button>
+              </div>
+
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <span className="truncate text-2xs text-faint">
+                  {pair.reason} · {(pair.similarity * 100).toFixed(0)}%
+                </span>
+                <div className="flex gap-1">
+                  <button
+                    className="btn !py-0.5 !px-1.5 !text-2xs"
+                    disabled={busy === key}
+                    title="These are genuinely different things"
+                    onClick={async () => {
+                      setBusy(key)
+                      try {
+                        await api.post('/graph/duplicates/dismiss', {
+                          a_id: pair.a.id,
+                          b_id: pair.b.id,
+                        })
+                        toast('Marked as different', 'success')
+                        duplicates.reload()
+                      } catch (err) {
+                        toast((err as Error).message, 'error')
+                      } finally {
+                        setBusy(null)
+                      }
+                    }}
+                  >
+                    not a match
+                  </button>
+                  <button
+                    className="btn btn-primary !py-0.5 !px-1.5 !text-2xs"
+                    disabled={busy === key}
+                    onClick={async () => {
+                      setBusy(key)
+                      try {
+                        await api.post('/graph/merge', {
+                          keep_id: keep.id,
+                          merge_ids: [drop.id],
+                        })
+                        toast(`Merged into ${keep.name}`, 'success')
+                        duplicates.reload()
+                        onMerged()
+                      } catch (err) {
+                        toast((err as Error).message, 'error')
+                      } finally {
+                        setBusy(null)
+                      }
+                    }}
+                  >
+                    merge
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

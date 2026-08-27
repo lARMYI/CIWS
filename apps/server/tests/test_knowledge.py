@@ -306,3 +306,84 @@ async def test_a_failed_node_skips_descendants_but_not_siblings():
     assert states["after"] == "skipped"
     assert states["ok"] == "done"
     assert run.outputs["ok"] == "sibling saw x"
+
+
+# ---------------------------------------------------------------------------
+# Curation (M4)
+# ---------------------------------------------------------------------------
+
+
+async def test_duplicates_are_proposed_for_a_near_identical_pair():
+    await graph.upsert_entity("person", "Sarah Chen", description="Platform lead")
+    await graph.upsert_entity("person", "Sarah Chen (Platform)", description="Platform lead")
+
+    pairs = await graph.find_duplicates(threshold=0.7)
+    assert pairs, "no candidate was proposed for an obvious duplicate"
+    names = {p["a"]["name"] for p in pairs} | {p["b"]["name"] for p in pairs}
+    assert "Sarah Chen" in names
+
+
+async def test_a_dismissed_pair_stops_being_proposed():
+    """Otherwise a curation queue never empties and stops being a to-do list."""
+    # An alias collision is a guaranteed candidate, so the test exercises the
+    # dismissal rather than the similarity threshold.
+    a = await graph.upsert_entity("person", "Alex Rivera", description="Engineer")
+    b = await graph.upsert_entity(
+        "person", "Alexander Rivera", description="Engineer", aliases=["Alex Rivera"]
+    )
+
+    before = await graph.find_duplicates(threshold=0.7)
+    assert any({p["a"]["id"], p["b"]["id"]} == {a.id, b.id} for p in before)
+
+    await graph.dismiss_duplicate(a.id, b.id)
+
+    after = await graph.find_duplicates(threshold=0.7)
+    assert not any({p["a"]["id"], p["b"]["id"]} == {a.id, b.id} for p in after)
+
+
+async def test_dismissal_is_recorded_on_both_entities():
+    a = await graph.upsert_entity("concept", "Alpha One")
+    b = await graph.upsert_entity("concept", "Alpha Two")
+    await graph.dismiss_duplicate(a.id, b.id)
+
+    left = await graph.get_entity(a.id)
+    right = await graph.get_entity(b.id)
+    assert b.id in (left.properties or {}).get(graph.NOT_DUPLICATE_OF, [])
+    assert a.id in (right.properties or {}).get(graph.NOT_DUPLICATE_OF, [])
+
+
+async def test_dismissing_twice_does_not_duplicate_the_record():
+    a = await graph.upsert_entity("concept", "Beta One")
+    b = await graph.upsert_entity("concept", "Beta Two")
+    await graph.dismiss_duplicate(a.id, b.id)
+    await graph.dismiss_duplicate(a.id, b.id)
+
+    left = await graph.get_entity(a.id)
+    assert (left.properties or {}).get(graph.NOT_DUPLICATE_OF, []).count(b.id) == 1
+
+
+async def test_dismissing_an_entity_against_itself_is_refused():
+    from ciws.core.errors import ValidationFailed
+
+    a = await graph.upsert_entity("concept", "Solo")
+    with pytest.raises(ValidationFailed):
+        await graph.dismiss_duplicate(a.id, a.id)
+
+
+async def test_dismissing_an_unknown_entity_is_a_typed_error():
+    from ciws.core.errors import NotFound
+
+    a = await graph.upsert_entity("concept", "Real")
+    with pytest.raises(NotFound):
+        await graph.dismiss_duplicate(a.id, "ent_does_not_exist")
+
+
+async def test_merging_still_works_after_a_dismissal_elsewhere():
+    """A dismissal must not block unrelated merges."""
+    a = await graph.upsert_entity("person", "Casey Doe")
+    b = await graph.upsert_entity("person", "Casey Doe (Ops)")
+    other = await graph.upsert_entity("concept", "Unrelated")
+    await graph.dismiss_duplicate(a.id, other.id)
+
+    merged = await graph.merge_entities(a.id, [b.id])
+    assert "Casey Doe (Ops)" in merged.aliases
