@@ -111,6 +111,14 @@ async def _boot() -> None:
     except Exception as exc:  # noqa: BLE001
         stages.append(("embeddings", f"failed ({exc})"))
 
+    try:
+        from . import scheduler
+
+        scheduler.start()
+        stages.append(("scheduler", f"running, {scheduler.TICK_SECONDS:.0f}s tick"))
+    except Exception as exc:  # noqa: BLE001
+        stages.append(("scheduler", f"failed ({exc})"))
+
     for name, detail in stages:
         log.info("  %-14s %s", name, detail)
 
@@ -124,9 +132,17 @@ async def _boot() -> None:
 
 
 async def _shutdown() -> None:
+    from . import scheduler
     from .db.base import close_db
     from .gateway.base import close_clients
     from .hubs.registry import manager
+
+    # Stop the scheduler first: a tick that starts an agent run while the
+    # database is closing produces a confusing cascade of errors on the way out.
+    try:
+        await scheduler.stop()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Scheduler shutdown: %s", exc)
 
     try:
         await manager.shutdown()

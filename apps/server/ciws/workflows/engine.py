@@ -387,6 +387,175 @@ async def _map(config: dict[str, Any], inputs: dict[str, Any], ctx: RunContext) 
     return {"out": list(results)}
 
 
+#: Hard ceiling on any loop node, whatever its config says. A workflow that
+#: wants more than this wants a different design, and an unbounded loop in an
+#: unattended run is how a workspace quietly spends a month's budget overnight.
+MAX_ITERATIONS = 25
+
+
+def _condition_met(config: dict[str, Any], value: Any) -> bool:
+    """Shared stop test for the loop nodes.
+
+    Deliberately the same vocabulary as ``branch`` -- ``equals`` / ``contains``
+    / truthiness -- so a workflow author who has used one already knows this.
+    """
+    text = _text(value)
+    if config.get("until_equals") is not None and str(config["until_equals"]) != "":
+        return text.strip() == str(config["until_equals"])
+    if config.get("until_contains"):
+        return str(config["until_contains"]).lower() in text.lower()
+    return bool(value) and text.strip().lower() not in ("false", "no", "0", "")
+
+
+@node("until", "Loop Until", "logic",
+      "Runs an inner node repeatedly, feeding each result back in, until a "
+      "condition holds or the iteration ceiling is reached.",
+      outputs=["out", "iterations", "exit_reason"],
+      config_schema={
+          "node_type": "model",
+          "node_config": {},
+          "max_iterations": 5,
+          "until_contains": "",
+          "until_equals": "",
+          "stop_on_repeat": True,
+      },
+      color="#facc15", icon="rotate-cw")
+async def _until(config: dict[str, Any], inputs: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    """The loop the DAG cannot express.
+
+    ``validate_graph`` rejects cycles, and rightly so -- a cyclic graph has no
+    topological order to execute and no obvious place to stop. The iteration
+    lives inside a node instead, which keeps the graph acyclic while letting a
+    workflow refine something until it is good enough.
+
+    Three ways out, and the caller is always told which one was taken: the
+    condition held, the output stopped changing, or the ceiling was reached.
+    A loop that ends without saying why is a loop nobody can debug.
+    """
+    inner_type = str(config.get("node_type") or "model")
+    spec = NODE_TYPES.get(inner_type)
+    if spec is None:
+        raise ValidationFailed(f"until: unknown inner node type '{inner_type}'")
+    if inner_type in ("until", "supervisor"):
+        raise ValidationFailed("until: a loop node cannot be its own inner node")
+
+    ceiling = max(1, min(int(config.get("max_iterations", 5) or 5), MAX_ITERATIONS))
+    inner_config = dict(config.get("node_config") or {})
+    stop_on_repeat = bool(config.get("stop_on_repeat", True))
+
+    value = _first(inputs)
+    previous = _text(value)
+    iterations = 0
+    exit_reason = "ceiling"
+
+    for iteration in range(ceiling):
+        if ctx.cancelled.is_set():
+            exit_reason = "cancelled"
+            break
+
+        result = await spec.run(inner_config, {"in": value}, ctx)
+        value = result.get("out")
+        iterations = iteration + 1
+
+        current = _text(value)
+        if _condition_met(config, value):
+            exit_reason = "condition"
+            break
+        # A loop whose output has stopped moving will not start again, and
+        # every further pass costs a model call for nothing.
+        if stop_on_repeat and iteration > 0 and current == previous:
+            exit_reason = "converged"
+            break
+        previous = current
+
+    bus.publish(
+        Topic.WORKFLOW_NODE,
+        run_id=ctx.run_id,
+        node="until",
+        iterations=iterations,
+        exit_reason=exit_reason,
+    )
+    return {"out": value, "iterations": iterations, "exit_reason": exit_reason}
+
+
+@node("supervisor", "Supervisor", "logic",
+      "Runs a worker node, has a critic judge the result, and repeats until the "
+      "critic approves or the ceiling is reached.",
+      outputs=["out", "iterations", "exit_reason", "verdict"],
+      config_schema={
+          "worker_type": "agent",
+          "worker_config": {},
+          "critic_type": "model",
+          "critic_config": {},
+          "approve_when_contains": "APPROVED",
+          "max_iterations": 3,
+      },
+      color="#facc15", icon="shield-check")
+async def _supervisor(
+    config: dict[str, Any], inputs: dict[str, Any], ctx: RunContext
+) -> dict[str, Any]:
+    """Route on a critic's judgement rather than on a boolean expression.
+
+    ``until`` can only test the worker's own output, which means the workflow
+    has to be able to recognise "good enough" with a string match. A critic can
+    read the work and say so, and its rejection carries a reason the next
+    attempt can act on -- which is the difference between retrying and
+    improving.
+    """
+    worker = NODE_TYPES.get(str(config.get("worker_type") or "agent"))
+    critic = NODE_TYPES.get(str(config.get("critic_type") or "model"))
+    if worker is None:
+        raise ValidationFailed(f"supervisor: unknown worker type '{config.get('worker_type')}'")
+    if critic is None:
+        raise ValidationFailed(f"supervisor: unknown critic type '{config.get('critic_type')}'")
+
+    ceiling = max(1, min(int(config.get("max_iterations", 3) or 3), MAX_ITERATIONS))
+    approve_marker = str(config.get("approve_when_contains") or "APPROVED")
+    worker_config = dict(config.get("worker_config") or {})
+    critic_config = dict(config.get("critic_config") or {})
+
+    task = _first(inputs)
+    work: Any = None
+    verdict = ""
+    iterations = 0
+    exit_reason = "ceiling"
+
+    for iteration in range(ceiling):
+        if ctx.cancelled.is_set():
+            exit_reason = "cancelled"
+            break
+
+        # After the first pass the worker sees the critic's objection, so the
+        # next attempt is a revision rather than a re-roll.
+        brief = task if iteration == 0 else (
+            f"{_text(task)}\n\n"
+            f"A previous attempt was rejected. Address this and try again.\n\n"
+            f"PREVIOUS ATTEMPT:\n{_text(work)}\n\n"
+            f"REVIEWER SAID:\n{verdict}"
+        )
+        work = (await worker.run(worker_config, {"in": brief}, ctx)).get("out")
+        iterations = iteration + 1
+
+        judged = await critic.run(
+            critic_config,
+            {"in": f"TASK:\n{_text(task)}\n\nWORK TO REVIEW:\n{_text(work)}"},
+            ctx,
+        )
+        verdict = _text(judged.get("out"))
+        if approve_marker.lower() in verdict.lower():
+            exit_reason = "approved"
+            break
+
+    bus.publish(
+        Topic.WORKFLOW_NODE,
+        run_id=ctx.run_id,
+        node="supervisor",
+        iterations=iterations,
+        exit_reason=exit_reason,
+    )
+    return {"out": work, "iterations": iterations, "exit_reason": exit_reason, "verdict": verdict}
+
+
 @node("merge", "Merge", "logic", "Combines several inputs into one block of text.",
       inputs=["a", "b", "c"], config_schema={"separator": "\n\n"}, color="#facc15", icon="merge")
 async def _merge(config: dict[str, Any], inputs: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
