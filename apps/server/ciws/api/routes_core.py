@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import platform
 import sys
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
@@ -15,7 +17,8 @@ from .. import __version__
 from ..core import logging as ciws_logging
 from ..core import paths, secrets
 from ..core.config import get_settings, save_settings
-from ..core.errors import NotFound
+from ..core.errors import NotFound, ValidationFailed
+from ..core.util import now
 from ..db.base import db_stats, vacuum
 from ..db.models import ModelRecord, Project
 from ..db.base import session_scope
@@ -83,6 +86,76 @@ async def system_vacuum() -> dict[str, Any]:
     removed = await gc_orphans()
     await vacuum()
     return {"ok": True, "orphaned_vectors_removed": removed}
+
+
+@router.get("/system/backup")
+async def backup_status() -> dict[str, Any]:
+    """What is encrypted at rest, and where backups have been written."""
+    from .. import backup
+
+    backups_dir = paths.home() / "backups"
+    existing = (
+        sorted(
+            ({"name": p.name, "bytes": p.stat().st_size} for p in backups_dir.glob("*.ciws")),
+            key=lambda row: row["name"],
+            reverse=True,
+        )
+        if backups_dir.is_dir()
+        else []
+    )
+    return {"encryption": backup.encryption_status(), "backups": existing[:20]}
+
+
+@router.post("/system/backup")
+async def create_backup(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Write an archive, then read it straight back.
+
+    Verification is not optional here: a backup nobody has opened is a hope, and
+    the moment to find out is now rather than during a restore.
+    """
+    from .. import backup
+
+    passphrase = str(body.get("passphrase") or "")
+    target = body.get("path")
+    if target:
+        destination = Path(str(target)).expanduser()
+    else:
+        stamp = now().strftime("%Y%m%d-%H%M%S")
+        destination = paths.home() / "backups" / f"ciws-{stamp}.ciws"
+
+    report = await run_in_threadpool(backup.create, destination, passphrase=passphrase)
+    report["verified"] = await run_in_threadpool(
+        backup.verify, destination, passphrase=passphrase
+    )
+    return report
+
+
+@router.post("/system/restore")
+async def restore_backup(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Unpack an archive over this workspace. The live database is kept aside."""
+    from .. import backup
+
+    path = str(body.get("path") or "")
+    if not path:
+        raise ValidationFailed("A path to the backup archive is required")
+
+    result = await run_in_threadpool(
+        backup.restore, Path(path).expanduser(), passphrase=str(body.get("passphrase") or "")
+    )
+    result["note"] = "Restart CIWS to open the restored database."
+    return result
+
+
+@router.post("/system/backup/verify")
+async def verify_backup(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    from .. import backup
+
+    path = str(body.get("path") or "")
+    if not path:
+        raise ValidationFailed("A path to the backup archive is required")
+    return await run_in_threadpool(
+        backup.verify, Path(path).expanduser(), passphrase=str(body.get("passphrase") or "")
+    )
 
 
 @router.get("/system/token")
