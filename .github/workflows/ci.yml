@@ -1,0 +1,141 @@
+name: CI
+
+# Everything here runs with no API keys and no network access to a model
+# provider. That is deliberate: the suite has to stay runnable by a contributor
+# who has just cloned the repo, and a test that only passes with a credential is
+# a test that quietly stops running.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A stray key in the environment would let a "no credentials" test pass for
+  # the wrong reason.
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+
+jobs:
+  server:
+    name: server (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor the README promises; 3.12 is what most people have.
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        # The [ingest] extra carries the office-format extractors. Without it
+        # those tests skip rather than fail, and four formats the README
+        # advertises would go quietly uncovered.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "apps/server[ingest]"
+          pip install pytest pytest-asyncio coverage reportlab
+
+      - name: Tests
+        working-directory: apps/server
+        run: python -m coverage run --source=ciws -m pytest tests/ -q
+
+      - name: Coverage ratchet
+        working-directory: apps/server
+        run: python -m coverage report --fail-under=70
+
+      - name: Coverage detail
+        if: always()
+        working-directory: apps/server
+        run: python -m coverage report --sort=cover
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Bundle size ratchet
+        working-directory: apps/web
+        # A ratchet set at roughly the current value costs nothing today and is
+        # the only thing that keeps the claim true in fifty merges' time.
+        run: |
+          size=$(find dist/assets -name '*.js' -exec gzip -c {} \; | wc -c)
+          echo "gzipped js: ${size} bytes"
+          if [ "$size" -gt 122880 ]; then
+            echo "::error::Bundle grew past the 120 KB gzipped ceiling."
+            exit 1
+          fi
+
+  boot:
+    name: keyless boot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e apps/server
+
+      - name: Boot into a clean home and reach a usable state
+        # The promise in the README is that CIWS is useful with zero API keys.
+        # This asserts it end to end rather than trusting it.
+        env:
+          CIWS_HOME: ${{ runner.temp }}/ciws-clean
+        run: |
+          python -m ciws --port 8799 --no-token &
+          server=$!
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8799/api/health && break
+            sleep 1
+          done
+
+          curl -sf http://127.0.0.1:8799/api/health > /dev/null
+
+          curl -sf -X POST http://127.0.0.1:8799/api/memory \
+            -H 'content-type: application/json' \
+            -d '{"content":"Deploys run on Fridays after the smoke suite."}' > /dev/null
+
+          hits=$(curl -sf -X POST http://127.0.0.1:8799/api/memory/search \
+            -H 'content-type: application/json' \
+            -d '{"query":"when do deploys run"}' | python -c 'import json,sys; print(len(json.load(sys.stdin)["hits"]))')
+
+          echo "recall returned ${hits} hit(s) with no credentials"
+          test "$hits" -ge 1 || { echo "::error::Keyless recall returned nothing."; exit 1; }
+
+          kill $server

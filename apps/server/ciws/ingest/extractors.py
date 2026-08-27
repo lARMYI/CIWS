@@ -86,12 +86,16 @@ def _need(package: str, fmt: str) -> ValidationFailed:
 
 def _read_text(path: Path) -> str:
     raw = path.read_bytes()[: MAX_TEXT_CHARS * 4]
-    for encoding in ("utf-8", "utf-16", "latin-1"):
+    for encoding in ("utf-8-sig", "utf-16", "latin-1"):
         try:
-            return raw.decode(encoding)
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace")
+        # utf-16 carries its BOM through as U+FEFF, and a stray one anywhere
+        # else survives every codec. Left in, it prefixes the first heading and
+        # breaks exact-token search on the first word of the document.
+        return text.lstrip("﻿")
+    return raw.decode("utf-8", errors="replace").lstrip("﻿")
 
 
 def strip_html(html: str) -> str:

@@ -20,7 +20,42 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
 from typing import Any, AsyncIterator
+
+
+def jsonable(value: Any) -> Any:
+    """Coerce a value into something ``json.dumps`` will accept.
+
+    Publishers are ordinary application code and pass whatever they have to
+    hand -- a ``datetime`` from a database row, a ``Path``, an ``Enum``. The
+    WebSocket serialises events with ``send_json``, so one unserialisable value
+    used to raise inside the send and tear down the socket.
+
+    That failure was worse than it looks: the bus replays recent history to
+    every new subscriber, so a single event carrying a ``datetime`` poisoned the
+    replay buffer and killed *every subsequent connection* -- the whole UI went
+    dead until a restart. Coercing here keeps a publisher's convenience from
+    becoming a transport failure.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return jsonable(value.value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [jsonable(v) for v in value]
+    return str(value)
 
 
 @dataclass(slots=True)
@@ -31,7 +66,13 @@ class Event:
     ts: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "topic": self.topic, "ts": self.ts, "data": self.data}
+        """The wire form. Always JSON-serialisable -- see ``jsonable``."""
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "ts": self.ts,
+            "data": jsonable(self.data),
+        }
 
 
 class Subscription:

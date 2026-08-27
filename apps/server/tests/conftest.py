@@ -45,3 +45,49 @@ async def clean_db(isolated_home: Path):
     index._loaded = False  # noqa: SLF001
     yield
     await close_db()
+
+
+@pytest.fixture
+async def app():
+    """The real ASGI app, without the boot lifespan.
+
+    ``clean_db`` has already prepared the schema, and running ``_boot`` here
+    would seed against a database the next test is about to drop. Subsystems a
+    route needs (tools, agents, hubs) are seeded by the test that needs them.
+    """
+    from ciws.app import create_app
+
+    return create_app()
+
+
+@pytest.fixture
+async def api(app):
+    """An authenticated client. Sends the token the way the UI does."""
+    import httpx
+
+    from ciws.api.deps import get_token
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://ciws.test",
+        headers={"x-ciws-token": get_token()},
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+async def anon(app):
+    """A client with no credentials, for asserting that auth actually bites."""
+    import httpx
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ciws.test") as client:
+        yield client
+
+
+@pytest.fixture
+def tools_loaded():
+    from ciws.tools.registry import load_builtin_tools
+
+    load_builtin_tools()
