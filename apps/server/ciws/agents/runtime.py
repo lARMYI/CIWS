@@ -22,6 +22,7 @@ Three things this loop takes seriously:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -179,20 +180,45 @@ async def _load_agent(agent_slug: str) -> AgentDef:
     return agent
 
 
+#: Told to the model whenever recalled context is present. Kept short on
+#: purpose: a long citation policy competes with the agent's actual task, and
+#: the marker format is already visible in the context block itself.
+CITATION_RULE = """\
+## Citing what you were given
+
+The context above carries a reference in backticks after each item, like
+`[mem_1a2b]` for a memory or `[chk_9f8e]` for a passage from the user's own
+documents. When a statement of yours rests on one of those items, put its
+reference at the end of the sentence.
+
+Cite only references that appear above -- never invent one, and never cite a
+claim that came from your own knowledge rather than from the workspace. An
+unsupported sentence with no marker is fine and expected; a marker on a
+sentence it does not support is not."""
+
+
 async def _build_system(
     agent: AgentDef, prompt: str, project_id: str | None, extra: str
-) -> str:
-    """Assemble the system prompt: persona, recalled memory, workspace facts."""
+) -> tuple[str, list[dict[str, Any]]]:
+    """Assemble the system prompt: persona, recalled memory, workspace facts.
+
+    Returns the prompt and the descriptors for everything recalled into it, so
+    the run can record what its answer was allowed to cite.
+    """
     blocks = [agent.system_prompt.strip()]
+    sources: list[dict[str, Any]] = []
 
     cfg = get_settings().memory
     if cfg.enabled and agent.memory_scope != "none":
         try:
             from ..memory import store
 
-            context = await store.build_context(prompt, limit=cfg.recall_limit, project_id=project_id)
+            context, sources = await store.build_context_with_sources(
+                prompt, limit=cfg.recall_limit, project_id=project_id
+            )
             if context:
                 blocks.append(context)
+                blocks.append(CITATION_RULE)
         except Exception as exc:  # noqa: BLE001 - memory is an enhancement, not a dependency
             log.debug("Memory context skipped: %s", exc)
 
@@ -203,7 +229,7 @@ async def _build_system(
         f"Current date: {now().strftime('%Y-%m-%d')} (UTC). "
         f"Use the current_time tool if you need more precision."
     )
-    return "\n\n---\n\n".join(b for b in blocks if b)
+    return "\n\n---\n\n".join(b for b in blocks if b), sources
 
 
 async def stream_agent(
@@ -239,7 +265,9 @@ async def stream_agent(
     if prompt:
         messages.append(ChatMessage.user(prompt))
 
-    system = await _build_system(agent, prompt or (messages[-1].text() if messages else ""), project_id, system_extra)
+    system, sources = await _build_system(
+        agent, prompt or (messages[-1].text() if messages else ""), project_id, system_extra
+    )
     tools = registry.specs(agent.tools or ["*"])
 
     async with session_scope() as s:
@@ -254,7 +282,9 @@ async def stream_agent(
                 goal=truncate(prompt, 2000),
                 model=resolved_model,
                 status="running",
-                meta={"depth": depth, "tool_count": len(tools)},
+                # Recorded up front: what the answer was allowed to cite is
+                # part of the provenance record, whether or not it cited any.
+                meta={"depth": depth, "tool_count": len(tools), "sources": sources},
             )
         )
 
@@ -428,6 +458,12 @@ async def stream_agent(
             run.error = error
             run.ended_at = now()
             run.duration_ms = duration
+            # Which of the offered sources the answer actually leaned on. The
+            # interface renders these; a marker the model invented resolves to
+            # nothing and is dropped here rather than shown as a real citation.
+            meta = dict(run.meta or {})
+            meta["citations"] = _resolve_citations(answer, sources)
+            run.meta = meta
 
     bus.publish(
         Topic.RUN_END if not error else Topic.RUN_ERROR,
@@ -452,27 +488,137 @@ async def stream_agent(
         index=duration,
     )
 
-    # Capture memories after the answer is out, so it never delays the user.
-    if get_settings().memory.auto_capture and answer and not error and depth == 0:
-        asyncio.create_task(_capture(prompt, answer, project_id, conversation_id))
+    # Capture after the answer is out, so accumulation never delays the user.
+    # An agent whose memory_scope is "none" is deliberately amnesiac -- the
+    # scout, for one -- and must not write to a shared store behind the user's
+    # back.
+    if (
+        get_settings().memory.auto_capture
+        and agent.memory_scope != "none"
+        and answer
+        and not error
+        and depth == 0
+    ):
+        task = asyncio.create_task(
+            _capture(prompt, answer, project_id, conversation_id, run_id)
+        )
+        # Hold a reference. asyncio only keeps a weak one, so an unreferenced
+        # task can be garbage collected mid-flight and the capture silently
+        # never happens -- which looks exactly like "extraction found nothing".
+        _capture_tasks.add(task)
+        task.add_done_callback(_capture_tasks.discard)
 
 
+#: A reference marker as it appears in an answer: [mem_1a2b] or [chk_9f8e].
+_CITATION = re.compile(r"\[((?:mem|chk|doc|ent)_[0-9a-f]{4,})\]")
+
+
+def _resolve_citations(answer: str, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Match the markers in an answer against what was actually offered.
+
+    A model can emit a plausible-looking reference it was never given. Resolving
+    against the offered set means an invented marker resolves to nothing and is
+    dropped, so the interface never renders a citation that does not lead
+    anywhere -- which would be worse than no citation at all.
+    """
+    if not answer or not sources:
+        return []
+    by_ref = {str(s.get("ref")): s for s in sources}
+    seen: set[str] = set()
+    cited: list[dict[str, Any]] = []
+    for ref in _CITATION.findall(answer):
+        if ref in seen or ref not in by_ref:
+            continue
+        seen.add(ref)
+        cited.append(by_ref[ref])
+    return cited
+
+
+#: Live capture tasks, held so the event loop cannot collect them mid-flight.
 _capture_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _capture(
-    prompt: str, answer: str, project_id: str | None, conversation_id: str | None
+    prompt: str,
+    answer: str,
+    project_id: str | None,
+    conversation_id: str | None,
+    run_id: str | None = None,
 ) -> None:
+    """Turn a finished exchange into memories and entities.
+
+    This is the loop that makes the workspace compound: without it the user has
+    to write every memory by hand, and the graph only ever contains what they
+    typed into it. Both halves degrade to a no-op when no model is configured,
+    so a keyless install is unaffected rather than broken.
+    """
+    from ..core.config import get_settings as _settings
+    from ..memory import store
+
+    cfg = _settings().memory
+    transcript = f"USER: {prompt}\n\nASSISTANT: {answer}"
+    source_ref = run_id or conversation_id
+
+    created: list[Any] = []
+    try:
+        created = await store.extract_memories(
+            transcript, project_id=project_id, source_ref=source_ref
+        )
+    except Exception as exc:  # noqa: BLE001 - capture is best-effort by design
+        log.debug("Auto memory capture skipped: %s", exc)
+
+    if cfg.extract_entities:
+        try:
+            from ..ontology import graph
+
+            result = await graph.extract_graph(
+                transcript, project_id=project_id, source_ref=source_ref
+            )
+            if result.get("entities") or result.get("edges"):
+                log.info(
+                    "Captured %d entities and %d links from run %s",
+                    len(result.get("entities") or []),
+                    len(result.get("edges") or []),
+                    run_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Auto entity capture skipped: %s", exc)
+
+    if created:
+        await _maybe_consolidate(len(created), project_id)
+
+
+#: Memories written since the last consolidation pass, by project.
+_since_consolidation: dict[str, int] = {}
+
+
+async def _maybe_consolidate(new_memories: int, project_id: str | None) -> None:
+    """Run a consolidation pass once enough has accumulated to be worth it.
+
+    Consolidation costs a model call and rewrites the store, so it is not worth
+    doing per capture. ``memory.consolidate_after`` is the threshold; counting
+    happens per project so a busy project does not drag a quiet one into a
+    pass it does not need.
+    """
+    from ..core.config import get_settings as _settings
+
+    threshold = _settings().memory.consolidate_after
+    if threshold <= 0:
+        return
+
+    key = project_id or ""
+    _since_consolidation[key] = _since_consolidation.get(key, 0) + new_memories
+    if _since_consolidation[key] < threshold:
+        return
+
+    _since_consolidation[key] = 0
     try:
         from ..memory import store
 
-        await store.extract_memories(
-            f"USER: {prompt}\n\nASSISTANT: {answer}",
-            project_id=project_id,
-            source_ref=conversation_id,
-        )
+        report = await store.consolidate(project_id=project_id)
+        log.info("Consolidation pass: %s", report)
     except Exception as exc:  # noqa: BLE001
-        log.debug("Auto memory capture skipped: %s", exc)
+        log.debug("Consolidation skipped: %s", exc)
 
 
 async def run_agent(
@@ -565,10 +711,15 @@ async def get_run(run_id: str) -> dict[str, Any] | None:
             )
         ).scalars().all()
 
+    meta = run.meta or {}
     return {
         **run.to_dict(),
         "steps": [s.to_dict() for s in steps],
         "tool_calls": [c.to_dict() for c in calls],
+        # Lifted out of meta so the trace panel does not have to know where
+        # provenance happens to be stored.
+        "citations": meta.get("citations") or [],
+        "sources_offered": meta.get("sources") or [],
     }
 
 

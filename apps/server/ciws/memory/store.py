@@ -461,31 +461,111 @@ async def build_context(
     query: str, *, limit: int = 12, project_id: str | None = None, max_chars: int = 4000
 ) -> str:
     """A compact markdown block for the system prompt. Empty when nothing fits."""
+    text, _ = await build_context_with_sources(
+        query, limit=limit, project_id=project_id, max_chars=max_chars
+    )
+    return text
+
+
+async def build_context_with_sources(
+    query: str,
+    *,
+    limit: int = 12,
+    project_id: str | None = None,
+    max_chars: int = 4000,
+    include_corpus: bool = True,
+) -> tuple[str, list[dict[str, Any]]]:
+    """The context block plus a resolvable descriptor for everything in it.
+
+    The descriptors are what make citation more than a convention: the agent is
+    told to cite ``[mem_...]`` and ``[chk_...]`` markers, and the caller keeps
+    this list so the interface can turn a marker in an answer back into the
+    memory or document passage it came from. Without the list a citation is
+    just a string that looks official.
+    """
     hits = await recall(query, limit=limit, project_id=project_id)
-    if not hits:
-        return ""
 
-    grouped: dict[str, list[RecallHit]] = {}
-    for hit in hits:
-        grouped.setdefault(hit.memory.kind, []).append(hit)
+    chunks: list[dict[str, Any]] = []
+    if include_corpus:
+        try:
+            from ..ingest import pipeline
 
-    lines = ["## What you remember about this user and their work", ""]
-    used = len(lines[0])
-    for kind in sorted(grouped, key=lambda k: KIND_ORDER.index(k) if k in KIND_ORDER else 99):
-        entries = sorted(grouped[kind], key=lambda h: h.memory.importance, reverse=True)
-        header = f"**{kind.title()}**"
-        lines.append(header)
-        used += len(header)
-        for hit in entries:
-            body = hit.memory.content.strip().replace("\n", " ")
-            line = f"- {body}  `[{hit.memory.id}]`"
+            chunks = await pipeline.search_corpus(query, limit=4, project_id=project_id)
+        except Exception as exc:  # noqa: BLE001 - the corpus is optional context
+            log.debug("Corpus context skipped: %s", exc)
+
+    if not hits and not chunks:
+        return "", []
+
+    sources: list[dict[str, Any]] = []
+    lines: list[str] = []
+    used = 0
+
+    if hits:
+        grouped: dict[str, list[RecallHit]] = {}
+        for hit in hits:
+            grouped.setdefault(hit.memory.kind, []).append(hit)
+
+        lines += ["## What you remember about this user and their work", ""]
+        used += len(lines[0])
+        truncated = False
+        for kind in sorted(grouped, key=lambda k: KIND_ORDER.index(k) if k in KIND_ORDER else 99):
+            if truncated:
+                break
+            entries = sorted(grouped[kind], key=lambda h: h.memory.importance, reverse=True)
+            header = f"**{kind.title()}**"
+            lines.append(header)
+            used += len(header)
+            for hit in entries:
+                body = hit.memory.content.strip().replace("\n", " ")
+                line = f"- {body}  `[{hit.memory.id}]`"
+                if used + len(line) > max_chars:
+                    lines.append("- ...(more memories available via the memory_search tool)")
+                    truncated = True
+                    break
+                lines.append(line)
+                used += len(line)
+                sources.append(
+                    {
+                        "ref": hit.memory.id,
+                        "type": "memory",
+                        "kind": hit.memory.kind,
+                        "text": body[:400],
+                        "score": round(hit.score, 4),
+                    }
+                )
+            lines.append("")
+
+    if chunks:
+        lines += ["## From your own documents", ""]
+        for chunk in chunks:
+            body = str(chunk.get("text", "")).strip().replace("\n", " ")
+            ref = str(chunk.get("id") or chunk.get("chunk_id") or "")
+            if not body or not ref:
+                continue
+            title = str(chunk.get("title") or chunk.get("document_title") or "document")
+            heading = str(chunk.get("heading") or "")
+            label = f"{title} -- {heading}" if heading else title
+            line = f"- **{label}**: {truncate(body, 320)}  `[{ref}]`"
             if used + len(line) > max_chars:
-                lines.append("- ...(more memories available via the memory_search tool)")
-                return "\n".join(lines)
+                lines.append("- ...(more passages available via the corpus_search tool)")
+                break
             lines.append(line)
             used += len(line)
+            sources.append(
+                {
+                    "ref": ref,
+                    "type": "chunk",
+                    "document_id": chunk.get("document_id"),
+                    "title": title,
+                    "heading": heading,
+                    "text": body[:400],
+                    "score": round(float(chunk.get("score", 0.0) or 0.0), 4),
+                }
+            )
         lines.append("")
-    return "\n".join(lines).strip()
+
+    return "\n".join(lines).strip(), sources
 
 
 # ---------------------------------------------------------------------------
