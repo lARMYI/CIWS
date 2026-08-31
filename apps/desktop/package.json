@@ -1,0 +1,23 @@
+{
+  "name": "ciws-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for CIWS. Starts the local hub and opens it in a native window.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.ciws.hub",
+    "productName": "CIWS",
+    "files": ["main.js", "preload.js", "package.json"],
+    "mac": { "category": "public.app-category.productivity" },
+    "win": { "target": "nsis" },
+    "linux": { "target": "AppImage", "category": "Utility" }
+  }
+}

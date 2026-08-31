@@ -1,0 +1,148 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  CIWS reads as instrumentation, not as a document. The rules that produce that:
+  near-black ground so data is the brightest thing on screen, hairline borders
+  instead of shadows, one accent colour reserved for "live", and monospace
+  numerals so columns of figures line up and stop jittering as they update.
+*/
+
+:root {
+  color-scheme: dark;
+  --grid: rgba(34, 211, 238, 0.028);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #05070a;
+  color: #dbe6f3;
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /* A faint grid, at the threshold of visibility, that reads as a plotting
+     surface rather than decoration. */
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+@layer base {
+  h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
+  input, textarea, select, button { font: inherit; color: inherit; }
+  ::selection { background: rgba(34, 211, 238, 0.28); }
+}
+
+@layer components {
+  /* Section labels. Uppercase and letterspaced so they read as chrome, not content. */
+  .label {
+    @apply text-2xs uppercase tracking-[0.16em] text-faint font-semibold;
+  }
+
+  .panel {
+    @apply bg-panel border border-line rounded;
+  }
+
+  .surface {
+    @apply bg-hull border border-line rounded;
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-line
+           bg-raised text-dim text-xs transition-colors select-none
+           hover:border-line2 hover:text-ink disabled:opacity-40
+           disabled:cursor-not-allowed disabled:hover:border-line;
+  }
+
+  .btn-primary {
+    @apply border-cyan/40 bg-cyan/10 text-cyan hover:bg-cyan/20 hover:border-cyan/60 hover:text-cyan;
+  }
+
+  .btn-danger {
+    @apply hover:border-rose/50 hover:text-rose;
+  }
+
+  .btn-ghost {
+    @apply bg-transparent border-transparent hover:bg-raised;
+  }
+
+  .field {
+    @apply w-full bg-void border border-line rounded px-2.5 py-1.5 text-sm text-ink
+           placeholder:text-faint outline-none transition-colors
+           focus:border-cyan/50 focus:ring-1 focus:ring-cyan/20;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-2xs
+           border border-line bg-raised text-dim whitespace-nowrap;
+  }
+
+  /* Data tables: tight rows, right-aligned numerals, hairline separators. */
+  .grid-row {
+    @apply grid items-center gap-3 px-3 py-2 border-b border-line/60
+           hover:bg-raised/60 transition-colors;
+  }
+
+  .num {
+    @apply tabular-nums text-right;
+  }
+
+  .scroll {
+    scrollbar-width: thin;
+    scrollbar-color: #243244 transparent;
+  }
+  .scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+  .scroll::-webkit-scrollbar-thumb {
+    background: #1a2432;
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll::-webkit-scrollbar-thumb:hover { background: #2c3d52; background-clip: content-box; }
+}
+
+@layer utilities {
+  .glow { box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.2), 0 0 22px -6px rgba(34, 211, 238, 0.35); }
+  .text-glow { text-shadow: 0 0 14px rgba(34, 211, 238, 0.5); }
+  .hairline { box-shadow: inset 0 -1px 0 0 #1a2432; }
+}
+
+/* The streaming caret. A block, because a thin bar disappears against the grid. */
+.caret::after {
+  content: '\25AE';
+  color: #22d3ee;
+  margin-left: 2px;
+  animation: blink 1.05s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
+
+/* Markdown output inside a chat bubble. Rendered as React elements, never as
+   HTML -- see components/Markdown.tsx for why. */
+.prose-ciws { @apply text-base text-ink; }
+.prose-ciws p { @apply my-2; }
+.prose-ciws h1 { @apply text-md font-semibold mt-4 mb-2 text-ink; }
+.prose-ciws h2 { @apply text-base font-semibold mt-3.5 mb-1.5 text-ink; }
+.prose-ciws h3 { @apply text-sm font-semibold mt-3 mb-1 text-dim uppercase tracking-wider; }
+.prose-ciws ul { @apply my-2 space-y-1 pl-4; }
+.prose-ciws ol { @apply my-2 space-y-1 pl-5 list-decimal; }
+.prose-ciws li { @apply relative; }
+.prose-ciws blockquote { @apply border-l-2 border-line2 pl-3 my-2 text-dim italic; }
+.prose-ciws a { @apply text-cyan underline decoration-cyan/30 underline-offset-2 hover:decoration-cyan; }
+.prose-ciws code { @apply bg-raised px-1 py-px rounded text-xs text-cyan border border-line; }
+.prose-ciws pre { @apply my-2.5 rounded border border-line bg-void overflow-x-auto scroll; }
+.prose-ciws pre code { @apply block p-3 bg-transparent border-0 text-dim text-xs leading-relaxed; }
+.prose-ciws table { @apply my-2 w-full border-collapse text-xs; }
+.prose-ciws th { @apply text-left px-2 py-1 border border-line bg-raised text-faint font-semibold; }
+.prose-ciws td { @apply px-2 py-1 border border-line align-top; }
+.prose-ciws hr { @apply my-4 border-line; }
