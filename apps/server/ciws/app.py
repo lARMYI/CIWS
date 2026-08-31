@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import routes_core, routes_knowledge, routes_work, ws
+from .api import routes_core, routes_improve, routes_knowledge, routes_work, ws
 from .api.deps import get_token
 from .core import logging as ciws_logging
 from .core.config import get_settings
@@ -77,6 +77,14 @@ async def _boot() -> None:
     except Exception as exc:  # noqa: BLE001
         log.exception("Tool registration failed")
         stages.append(("tools", f"failed ({exc})"))
+
+    try:
+        from .tools import skills
+
+        loaded = await skills.load_active_skills()
+        stages.append(("skills", f"{loaded} self-authored loaded" if loaded else "none active"))
+    except Exception as exc:  # noqa: BLE001
+        stages.append(("skills", f"failed ({exc})"))
 
     try:
         from .agents import presets
@@ -197,6 +205,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_core.router, prefix="/api")
     app.include_router(routes_work.router, prefix="/api")
     app.include_router(routes_knowledge.router, prefix="/api")
+    app.include_router(routes_improve.router, prefix="/api")
     app.include_router(ws.router, prefix="/api")
 
     static = ui_dir()

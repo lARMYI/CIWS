@@ -471,6 +471,7 @@ def load_builtin_tools() -> int:
         media_tools,
         memory_tools,
         python_tools,
+        self_tools,
         shell_tools,
         task_tools,
         web_tools,

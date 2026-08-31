@@ -55,6 +55,24 @@ class MemoryConfig(BaseModel):
     consolidate_after: int = 200  # new memories before a consolidation pass
 
 
+class ImproveConfig(BaseModel):
+    """The main agent's self-improvement loops.
+
+    Two different consent defaults on purpose. Directives are prompt text --
+    bounded, visible, reversible in one click -- so they apply themselves.
+    Skills are code the agent wrote; code waits for a human yes unless the
+    user explicitly opts into auto-activation.
+    """
+
+    enabled: bool = True
+    reflect_after_runs: int = 8          # completed runs before a reflection pass
+    reflect_min_interval_minutes: int = 30
+    max_directives: int = 10
+    auto_apply_directives: bool = True
+    auto_activate_skills: bool = False
+    max_skills: int = 24
+
+
 class SecurityConfig(BaseModel):
     """Local-first does not mean unguarded."""
 
@@ -97,6 +115,7 @@ class Settings(BaseSettings):
     routing: RoutingPolicy = Field(default_factory=RoutingPolicy)
     agents: AgentDefaults = Field(default_factory=AgentDefaults)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    improve: ImproveConfig = Field(default_factory=ImproveConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
 

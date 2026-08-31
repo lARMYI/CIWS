@@ -138,7 +138,7 @@ class ChatBody(BaseModel):
     message: str = ""
     conversation_id: str | None = None
     project_id: str | None = None
-    agent: str = "analyst"
+    agent: str = presets.MAIN_SLUG
     model: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
     #: History is loaded from the DB; this only matters for stateless calls.

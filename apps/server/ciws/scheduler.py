@@ -1,4 +1,4 @@
-"""Background jobs: due tasks and watched folders.
+"""Background jobs: due tasks, watched folders, and the reflection loop.
 
 Two things in this build were configurable but inert. The ``tasks`` table had a
 ``due_at`` and an ``assignee`` and nothing ever came round to run them, and a
@@ -233,10 +233,33 @@ async def scan_folders() -> int:
 # ---------------------------------------------------------------------------
 
 
+async def reflect_if_due() -> Any:
+    """The main agent's reflection pass, when enough new runs have accumulated.
+
+    The due-ness checks live in :func:`ciws.agents.improve.maybe_reflect` and
+    are a cheap count query, so putting this on the 30-second tick costs
+    nothing until there is actually something to reflect on.
+    """
+    from .agents import improve
+
+    report = await improve.maybe_reflect()
+    if report is not None:
+        bus.publish(
+            Topic.SYSTEM_NOTICE,
+            level="INFO",
+            message=f"Reflection pass: {report.get('assessment') or 'completed'}",
+        )
+    return report
+
+
 async def tick() -> dict[str, Any]:
     """One pass of every job. Exposed so a test does not have to wait 30s."""
     report: dict[str, Any] = {}
-    for name, job in (("tasks", run_due_tasks), ("folders", scan_folders)):
+    for name, job in (
+        ("tasks", run_due_tasks),
+        ("folders", scan_folders),
+        ("improve", reflect_if_due),
+    ):
         try:
             report[name] = await job()
         except Exception as exc:  # noqa: BLE001 - one bad job must not stop the rest

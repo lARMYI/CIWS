@@ -174,7 +174,11 @@ async def _load_agent(agent_slug: str) -> AgentDef:
     agent = await presets.get_agent(agent_slug)
     if agent is None:
         await presets.seed_presets()
-        agent = await presets.get_agent(agent_slug) or await presets.get_agent("analyst")
+        agent = (
+            await presets.get_agent(agent_slug)
+            or await presets.get_agent(presets.MAIN_SLUG)
+            or await presets.get_agent("analyst")
+        )
     if agent is None:
         raise NotFound(f"No agent '{agent_slug}' and no default available")
     return agent
@@ -208,6 +212,17 @@ async def _build_system(
     blocks = [agent.system_prompt.strip()]
     sources: list[dict[str, Any]] = []
 
+    # Directives the agent adopted about its own behaviour ride directly under
+    # the persona, so a learned rule binds exactly as hard as a written one.
+    try:
+        from . import improve
+
+        directives = improve.directive_block(agent)
+        if directives:
+            blocks.append(directives)
+    except Exception as exc:  # noqa: BLE001 - a broken playbook must not stop runs
+        log.debug("Directive block skipped: %s", exc)
+
     cfg = get_settings().memory
     if cfg.enabled and agent.memory_scope != "none":
         try:
@@ -234,7 +249,7 @@ async def _build_system(
 
 async def stream_agent(
     *,
-    agent_slug: str = "analyst",
+    agent_slug: str = presets.MAIN_SLUG,
     prompt: str = "",
     history: list[ChatMessage] | None = None,
     conversation_id: str | None = None,
@@ -623,7 +638,7 @@ async def _maybe_consolidate(new_memories: int, project_id: str | None) -> None:
 
 async def run_agent(
     *,
-    agent_slug: str = "analyst",
+    agent_slug: str = presets.MAIN_SLUG,
     prompt: str = "",
     history: list[ChatMessage] | None = None,
     conversation_id: str | None = None,

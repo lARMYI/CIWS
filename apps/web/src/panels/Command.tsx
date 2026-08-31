@@ -20,6 +20,8 @@ import {
   Pin,
   Send,
   Terminal,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Wrench,
   X,
@@ -71,7 +73,7 @@ interface Draft {
 export function Command({ projectId }: { projectId: string | null }) {
   const toast = useToast()
   const [conversationId, setConversationId] = useLocalState<string | null>('ciws.conversation', null)
-  const [agent, setAgent] = useLocalState('ciws.agent', 'analyst')
+  const [agent, setAgent] = useLocalState('ciws.agent', 'main')
   const [model, setModel] = useLocalState('ciws.model', '')
   const [input, setInput] = useState('')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -639,7 +641,7 @@ function Message({ message, showThinking }: { message: MessageRow; showThinking:
   }
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in group/msg">
       {showThinking && message.thinking && <ThinkingBlock text={message.thinking} />}
       <div className="flex items-center gap-2 mb-1.5">
         <Cpu size={11} className="text-faint" />
@@ -652,6 +654,7 @@ function Message({ message, showThinking }: { message: MessageRow; showThinking:
         {message.cost_usd > 0 && (
           <span className="text-2xs text-faint tabular-nums">{usd(message.cost_usd)}</span>
         )}
+        {message.run_id && <Feedback runId={message.run_id} />}
       </div>
       {message.error ? (
         <ErrorLine error={message.error} />
@@ -659,6 +662,57 @@ function Message({ message, showThinking }: { message: MessageRow; showThinking:
         <Markdown text={message.content} />
       )}
     </div>
+  )
+}
+
+/**
+ * Thumbs on a finished run. This is not decoration: the score lands on the
+ * run record, and the main agent's reflection pass weighs direct human
+ * feedback above everything else it can see about its own performance.
+ */
+function Feedback({ runId }: { runId: string }) {
+  const [sent, setSent] = useState<number | null>(null)
+  const send = useCallback(
+    async (score: number) => {
+      try {
+        await api.post('/improve/feedback', { run_id: runId, score })
+        setSent(score)
+      } catch {
+        // A failed vote is not worth an error banner.
+      }
+    },
+    [runId],
+  )
+  return (
+    <span
+      className={classNames(
+        'ml-auto flex items-center gap-0.5 transition-opacity',
+        sent === null && 'opacity-0 group-hover/msg:opacity-100',
+      )}
+    >
+      <button
+        className={classNames(
+          'p-1 rounded hover:bg-raised',
+          sent === 1 ? 'text-jade' : 'text-faint hover:text-jade',
+        )}
+        title="Good answer -- the agent learns from this"
+        disabled={sent !== null}
+        onClick={() => void send(1)}
+      >
+        <ThumbsUp size={10} />
+      </button>
+      <button
+        className={classNames(
+          'p-1 rounded hover:bg-raised',
+          sent === -1 ? 'text-rose' : 'text-faint hover:text-rose',
+        )}
+        title="Bad answer -- the agent learns from this"
+        disabled={sent !== null}
+        onClick={() => void send(-1)}
+      >
+        <ThumbsDown size={10} />
+      </button>
+    </span>
   )
 }
 
@@ -684,7 +738,7 @@ function Welcome({
           <Bot size={18} className="text-cyan" />
         </div>
         <h2 className="text-md text-ink font-semibold tracking-tight">
-          {agent?.name ?? 'Analyst'} standing by
+          {agent?.name ?? 'Prime'} standing by
         </h2>
         <p className="text-xs text-faint mt-1.5 leading-relaxed">
           {agent?.description ?? 'Your workspace, your models, your machine.'}
