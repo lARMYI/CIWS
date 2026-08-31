@@ -536,7 +536,7 @@ async def test_a_missing_watched_path_is_an_error_not_a_crash(tmp_path: Path):
 
 async def test_a_tick_runs_every_job_and_reports():
     report = await scheduler.tick()
-    assert set(report) == {"tasks", "folders"}
+    assert set(report) == {"tasks", "folders", "improve"}
 
 
 async def test_one_failing_job_does_not_stop_the_others(monkeypatch):

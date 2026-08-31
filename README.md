@@ -23,9 +23,14 @@ accumulates**. Every conversation can write to a memory store, extract entities 
 pull from a corpus of your own documents — so the hub gets more useful the longer you use it,
 rather than starting from zero every session.
 
+And the agent at the centre of it learns. **Prime**, the main agent you talk to by default,
+reflects on its own run record and your feedback, maintains a set of learned directives in its
+own prompt, and can even write new tools for itself — code that runs only after its tests pass
+and you approve it.
+
 | | |
 |---|---|
-| **Command** | Agent console with a live tool trace. You see every tool call, its arguments, its result and its cost as it happens. |
+| **Command** | Agent console with a live tool trace. You see every tool call, its arguments, its result and its cost as it happens — and thumbs on every answer feed the main agent's reflection loop. |
 | **Ontology** | A force-directed entity graph. People, systems, projects and concepts, with typed links, link analysis, and a curation queue for merging duplicates. |
 | **Knowledge** | Persistent memory with hybrid recall, plus a searchable corpus of your PDFs, notes, spreadsheets and code. |
 | **Studio** | Image and video generation across seven backends, including two that run entirely on your own GPU. |
@@ -134,6 +139,16 @@ duplicate detection and merging live.
 the database before the agent sees the result. An agent that cannot explain where a claim came from
 is not much use, and this is where that trail lives.
 
+**A main agent that improves.** Prime's run record, tool error rates and your thumbs up/down are
+gathered into an evidence pack, and a scheduled reflection pass distils them into *lessons*
+(memories of kind `lesson`, recalled like any other) and *directives* — standing rules appended to
+its own system prompt, each with an id, a reason, and one-click retirement. When the gap is a
+capability rather than a rule, the agent can forge a **skill**: a `run()` function plus a test
+that proves it. Skills whose tests fail are not stored; skills whose tests pass still do not
+execute until you activate them, unless you explicitly opt into auto-activation. Prompt changes
+apply themselves because they are bounded, visible and reversible; code waits for a human yes
+because it is neither.
+
 ---
 
 ## Security
@@ -154,6 +169,11 @@ This is software that runs models with tool access on your own machine. The hone
 - **Web and document content is treated as untrusted data.** Every agent's system prompt says so
   explicitly, because a model that treats a search snippet as an instruction is the most common way
   a browsing agent gets hijacked.
+- **Self-written code is consent-gated and honest about what it is.** A skill the agent forges for
+  itself must pass its own tests, then sits inert as *proposed* until you activate it — revisions
+  drop back to proposed, because new code voids the old approval. Skills execute in a subprocess
+  with a timeout, which is isolation, not a sandbox, exactly like the python tool they are gated
+  behind; every proposal, activation and directive change lands in the audit trail.
 
 Nothing leaves your machine except calls to the providers whose keys you supplied.
 
@@ -166,7 +186,7 @@ Nothing leaves your machine except calls to the providers whose keys you supplie
 ```
 
 ```bash
-cd apps/server && ../../.venv/bin/python -m pytest tests/ -q   # 336 tests, no keys needed
+cd apps/server && ../../.venv/bin/python -m pytest tests/ -q   # 355 tests, no keys needed
 cd apps/web && npm run typecheck
 ```
 
@@ -186,14 +206,14 @@ apps/
     memory/     embeddings, hybrid recall, extraction, consolidation
     ontology/   entity graph, link analysis, entity resolution
     ingest/     extraction, heading-aware chunking, corpus search
-    agents/     the reason/act loop, personas, run traces
-    tools/      registry with risk policy and audit, 37 built-in tools
+    agents/     the reason/act loop, personas, run traces, the reflection engine
+    tools/      registry with risk policy and audit, 43 built-in tools, the skill forge
     mcp/        dependency-free MCP client (stdio + HTTP)
     hubs/       connectors and web search
     media/      image and video generation, asset library
     workflows/  DAG engine with level-wise parallelism and bounded loop nodes
     api/        REST routers + WebSocket
-    scheduler   due tasks and watched folders, on a background tick
+    scheduler   due tasks, watched folders and reflection, on a background tick
     backup.py   snapshot, verify, restore, optional passphrase encryption
   web/          React + TypeScript + Tailwind
   desktop/      Electron shell

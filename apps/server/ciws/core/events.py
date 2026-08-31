@@ -180,6 +180,10 @@ class Topic:
     INGEST_PROGRESS = "ingest.progress"
     INGEST_DONE = "ingest.done"
 
+    IMPROVE_REFLECT = "improve.reflect"
+    IMPROVE_DIRECTIVE = "improve.directive"
+    IMPROVE_SKILL = "improve.skill"
+
     HUB_STATUS = "hub.status"
     MODEL_STATUS = "model.status"
     WORKFLOW_NODE = "workflow.node"

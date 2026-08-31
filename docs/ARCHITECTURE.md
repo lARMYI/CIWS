@@ -116,6 +116,35 @@ tool, so stopping a runaway run does not mean waiting out its next sixty-second 
 A tool that raises becomes an *observation*, never a crashed run. An exception would abort the
 whole turn; a failed tool should instead be something the agent can reason about and route around.
 
+## Why the main agent improves the way it does
+
+Users talk to one agent by default — Prime, slug `main` — and it runs three improvement loops.
+Each loop got the weakest mechanism that actually does the job:
+
+**Lessons are memories.** What reflection learns ("fetching that site times out; snippets
+suffice") is stored as an ordinary memory of kind `lesson`, so hybrid recall surfaces it exactly
+when a similar situation recurs. No new retrieval machinery, and lessons decay, consolidate, and
+back up like everything else.
+
+**Directives are prompt text with ids.** A standing behavioural rule lives on the agent row as
+`{id, text, reason, status, origin}` and is appended under the persona on every run. That makes a
+learned rule exactly as binding as a written one, visible in the Improve status, attributable to
+the evidence that motivated it, and retirable in one click — by the human or by the agent itself.
+The reflection pass (scheduled off run counts, or triggered with `self_reflect`) reads an evidence
+pack — run outcomes, tool error rates, and direct human feedback, which outweighs everything —
+and may add at most two directives per pass, under a hard cap it cannot raise.
+
+**Skills are code behind a lifecycle.** When the gap is a capability rather than a rule, the agent
+forges a tool: `run()` plus a test that proves it, both stored in the database. The tests execute
+immediately in a subprocess; a skill whose tests fail is not stored at all. A stored skill still
+does not execute — `proposed` is inert until a human activates it (or the user opts into
+auto-activation), a revision always drops back to `proposed` because new code voids the old
+approval, and execution goes through the same subprocess-with-a-timeout honesty as the python
+tool, gated on the same setting.
+
+The asymmetry between the loops is the design: prompt changes apply themselves because they are
+bounded, visible, and reversible; code changes wait for consent because they are none of those.
+
 ## Why the tool registry owns policy
 
 Three things are centralised there rather than left to each tool:

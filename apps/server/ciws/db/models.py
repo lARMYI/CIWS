@@ -147,7 +147,7 @@ class Memory(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("mem"))
     project_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(32), default="fact", index=True)
-    # fact | preference | event | insight | procedure | identity | relationship | task
+    # fact | preference | event | insight | procedure | identity | relationship | task | lesson
     content: Mapped[str] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text, default="")
     importance: Mapped[float] = mapped_column(Float, default=0.5, index=True)
@@ -380,6 +380,36 @@ class ToolCall(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
+class Skill(Base, TimestampMixin):
+    """A tool an agent wrote for itself: code, tests, and an approval state.
+
+    Self-authored code never runs from ``proposed`` -- it must pass its own
+    tests and then be activated, by a human unless the user has opted into
+    auto-activation. The code stays in the database rather than on disk so a
+    backup carries the agent's acquired skills with everything else.
+    """
+
+    __tablename__ = "skills"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("skl"))
+    slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    #: JSON-schema for the tool's arguments, exactly as the model will see it.
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    code: Mapped[str] = mapped_column(Text, default="")
+    test_code: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    # proposed | active | disabled | rejected
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    agent_slug: Mapped[str] = mapped_column(String(80), default="")
+    origin_run_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    last_test_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class Workflow(Base, TimestampMixin):
     """A saved DAG of model, tool and agent nodes."""
 
@@ -542,6 +572,6 @@ class Task(Base, TimestampMixin):
 
 ALL_TABLES = (
     Project, Conversation, Message, Memory, Entity, Edge, Document, Chunk,
-    Embedding, AgentDef, Run, RunStep, ToolCall, Workflow, WorkflowRun,
+    Embedding, AgentDef, Run, RunStep, ToolCall, Skill, Workflow, WorkflowRun,
     Asset, Hub, ModelRecord, AuditEvent, Task,
 )
